@@ -1,6 +1,6 @@
 ---
 name: ha-ssh-config
-description: "Safe SSH-based YAML config management for Home Assistant. Handles shell_command entries with parse-modify-serialize via PyYAML, auto-backup, and dry-run mode."
+description: "Safe SSH-based YAML config management for Home Assistant. Handles shell_command entries with parse-modify-serialize via ruamel.yaml (preserves !include + comments), auto-backup, and dry-run mode."
 version: "1.0.0"
 author: "punchtaylor"
 license: "MIT"
@@ -8,7 +8,7 @@ license: "MIT"
 
 # HA SSH Config Skill
 
-Safe, idempotent YAML config management for Home Assistant via SSH. Uses PyYAML for parse-modify-serialize to prevent config corruption.
+Safe, idempotent YAML config management for Home Assistant via SSH. Uses ruamel.yaml in round-trip mode for parse-modify-serialize, preserving `!include` directives and comments.
 
 ## When to Use
 
@@ -19,7 +19,7 @@ Safe, idempotent YAML config management for Home Assistant via SSH. Uses PyYAML 
 ## Prerequisites
 
 - Passwordless SSH to HA host (`ha` alias configured)
-- PyYAML installed: `pip3 install pyyaml`
+- ruamel.yaml installed: `pip3 install ruamel.yaml`
 - `HASS_URL` and `HASS_TOKEN` env vars set in `~/.hermes/.env`
 
 ## Interface
@@ -97,7 +97,7 @@ python3 ~/.hermes/skills/ha-ssh-config/scripts/ha_ssh_config.py reload
 
 - If `ha core check` fails after a write, the script auto-restores from backup. Check the error message for YAML syntax issues.
 - If SSH commands time out, verify network connectivity and that the `ha` alias resolves.
-- **`!include` tags require ruamel.yaml:** Standard PyYAML's `safe_load` chokes on `!include`, `!include_dir_merge_named`, etc. The script tries `ruamel.yaml` first, falls back to PyYAML with `null` replacement. Install: `pip3 install ruamel.yaml`. Without it, writes will fail `ha core check`.
+- **`!include` tags require ruamel.yaml:** Standard PyYAML's `safe_load` chokes on `!include`, `!include_dir_merge_named`, etc. The script uses ruamel.yaml in round-trip mode to preserve these tags through parse-modify-serialize. Install: `pip3 install ruamel.yaml` — required, no fallback.
 - **SSH write pattern for HA OS:** Must use stdin pipe: `ssh ha 'cat > /path'` with `input=content`. Other patterns fail on HA OS: direct `>` redirection gives "No such file or directory", `scp` fails across Docker container filesystems, `mv` fails across mounts, `tee` has quoting issues.
 - **Service cache after reload:** `ha core reload` picks up new entries but doesn't clear the cache for removed entries. A full `ha core restart` is needed to purge stale service entries (may take 15-20s).
 - **argparse gotcha:** Don't name a positional arg `command` when using subparsers with `dest='command'` — they collide. Use `shell_command` or similar.

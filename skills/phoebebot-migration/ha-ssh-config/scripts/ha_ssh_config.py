@@ -23,9 +23,11 @@ import shutil
 import subprocess
 import sys
 import time
+from io import StringIO
 from pathlib import Path
 
-import yaml
+from ruamel.yaml import YAML, YAMLError
+from ruamel.yaml.comments import CommentedMap
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -102,54 +104,35 @@ def create_backup() -> str:
 
 # ── YAML Helpers ───────────────────────────────────────────────────────────
 
+_yaml = YAML(typ="rt")
+_yaml.preserve_quotes = True
 
-def parse_yaml(content: str) -> dict:
-    """Parse YAML content safely, handling HA custom tags."""
+
+def parse_yaml(content: str) -> CommentedMap:
+    """Parse YAML content, preserving HA custom tags (!include, !secret, etc) and comments."""
     try:
-        # Use ruamel.yaml if available, otherwise fall back to safe_load with tag replacement
-        try:
-            from ruamel.yaml import YAML
-            from io import StringIO
-            yaml_parser = YAML()
-            yaml_parser.preserve_quotes = True
-            stream = StringIO(content)
-            data = yaml_parser.load(stream)
-            return data if data else {}
-        except ImportError:
-            # Fallback: replace HA custom tags with None for parsing
-            import re
-            safe_content = re.sub(r'!include[_a-z]*\s+\S+', 'null', content)
-            data = yaml.safe_load(safe_content)
-            return data if data else {}
-    except yaml.YAMLError as e:
+        data = _yaml.load(StringIO(content))
+        return data if data is not None else CommentedMap()
+    except YAMLError as e:
         print(json.dumps({"status": "error", "message": f"YAML parse error: {e}"}))
         sys.exit(1)
 
 
-def serialize_yaml(data: dict) -> str:
-    """Serialize dict to YAML, preserving HA custom tags where possible."""
+def serialize_yaml(data) -> str:
+    """Serialize back to YAML, preserving HA custom tags and comments."""
     try:
-        # Use ruamel.yaml if available for better preservation
-        try:
-            from ruamel.yaml import YAML
-            from io import StringIO
-            yaml_parser = YAML()
-            yaml_parser.preserve_quotes = True
-            stream = StringIO()
-            yaml_parser.dump(data, stream)
-            return stream.getvalue()
-        except ImportError:
-            # Fallback: standard yaml.dump
-            return yaml.dump(data, default_flow_style=False, sort_keys=False)
-    except Exception as e:
+        stream = StringIO()
+        _yaml.dump(data, stream)
+        return stream.getvalue()
+    except YAMLError as e:
         print(json.dumps({"status": "error", "message": f"YAML serialize error: {e}"}))
         sys.exit(1)
 
 
-def ensure_shell_command_section(data: dict) -> dict:
+def ensure_shell_command_section(data: CommentedMap) -> CommentedMap:
     """Ensure shell_command section exists in config data."""
-    if "shell_command" not in data or not isinstance(data.get("shell_command"), dict):
-        data["shell_command"] = {}
+    if "shell_command" not in data or not isinstance(data.get("shell_command"), (dict, CommentedMap)):
+        data["shell_command"] = CommentedMap()
     return data
 
 
