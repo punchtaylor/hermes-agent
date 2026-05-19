@@ -16,6 +16,7 @@ Requires:
 import asyncio
 import logging
 import os
+import pathlib
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -125,6 +126,24 @@ class MQTTAdapter(BasePlatformAdapter):
         self._cooldown_seconds: float = float(extra.get("cooldown_seconds", 30))
         self._last_event_time: Dict[str, float] = {}
 
+        # Observational mode: append inbound events to a log file instead of
+        # invoking the agent loop per event. MQTT events are observations, not
+        # chat turns — auto-invoking inference for every banshee/presence tick
+        # is wasted compute. With observational mode on, events accumulate in
+        # the log file and the agent reads them via filesystem/MemPalace tools
+        # when it actually wakes up. Toggle off if you want the legacy
+        # agent-invoking behavior (with send()-suppression preventing the loop).
+        self._observational: bool = bool(extra.get("observational", True))
+        log_default = (
+            pathlib.Path.home()
+            / "PhoebeVault"
+            / "Devlog"
+            / f"mqtt-stream-{datetime.now().strftime('%Y-%m')}.md"
+        )
+        self._observe_log_path: Optional[pathlib.Path] = pathlib.Path(
+            extra.get("observe_log_path", str(log_default))
+        )
+
         # Client identity for the broker
         self._client_id: str = extra.get("client_id", "phoebe-hermes")
         self._keepalive: int = int(extra.get("keepalive", 60))
@@ -224,7 +243,7 @@ class MQTTAdapter(BasePlatformAdapter):
         logger.info("[%s] Broker disconnected (will auto-reconnect)", self.name)
 
     def _on_message(self, client, userdata, msg):
-        """Forward inbound MQTT message into the async event loop."""
+        """Forward inbound MQTT message — observational by default."""
         try:
             topic = msg.topic or ""
             if not topic:
@@ -249,7 +268,12 @@ class MQTTAdapter(BasePlatformAdapter):
             except Exception:
                 payload_text = repr(msg.payload)
 
-            # Build a MessageEvent so the agent sees this as a regular inbound message
+            if self._observational:
+                # Observational mode: append to log file, don't invoke agent loop
+                self._log_event(topic, payload_text)
+                return
+
+            # Legacy: build MessageEvent + dispatch into async agent loop
             source = self.build_source(
                 chat_id=topic,
                 chat_name=topic,
@@ -265,11 +289,31 @@ class MQTTAdapter(BasePlatformAdapter):
                 timestamp=datetime.now(),
             )
 
-            # Schedule the async handler back on the gateway's event loop
             if self._loop is not None and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.handle_message(event), self._loop)
         except Exception as e:
             logger.warning("[%s] _on_message error: %s", self.name, e)
+
+    def _log_event(self, topic: str, payload: str) -> None:
+        """Append an MQTT event to the observational log file.
+
+        Format: one bullet per event with ISO timestamp + topic + payload.
+        Long payloads are truncated to 500 chars to keep the log readable.
+        The file is created on first write; parent directory must exist
+        (PhoebeVault is scaffolded ahead of adapter use).
+        """
+        if not self._observe_log_path:
+            return
+        try:
+            self._observe_log_path.parent.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().isoformat(timespec="seconds")
+            payload_short = payload[:500] + ("..." if len(payload) > 500 else "")
+            # Strip newlines so each event is one bullet
+            payload_one_line = payload_short.replace("\n", " ").replace("\r", " ")
+            with self._observe_log_path.open("a", encoding="utf-8") as f:
+                f.write(f"- `{ts}` **{topic}** {payload_one_line}\n")
+        except Exception as e:
+            logger.warning("[%s] log write failed: %s", self.name, e)
 
     # ------------------------------------------------------------------
     # Outbound messaging
