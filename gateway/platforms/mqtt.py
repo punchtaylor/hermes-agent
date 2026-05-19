@@ -119,8 +119,10 @@ class MQTTAdapter(BasePlatformAdapter):
         # Always ignore our own publish prefix so we don't loop on send()
         self._self_topic_prefix: str = extra.get("self_topic_prefix", "phoebe/hermes/")
 
-        # Per-topic cooldown to prevent floods (e.g., presence state can be chatty)
-        self._cooldown_seconds: float = float(extra.get("cooldown_seconds", 0))
+        # Per-topic cooldown to prevent floods (chatty topics like presence/state
+        # can fire many times per second; default 30s throttle is a reasonable
+        # ceiling for inference cost without missing event semantics).
+        self._cooldown_seconds: float = float(extra.get("cooldown_seconds", 30))
         self._last_event_time: Dict[str, float] = {}
 
         # Client identity for the broker
@@ -280,17 +282,37 @@ class MQTTAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Publish `content` to the MQTT topic named by `chat_id`.
+        """Read-mostly outbound. Most MQTT chat_id values are SOURCE topics
+        (the topic an event came in on), and publishing back to them creates a
+        feedback loop because the broker echoes the publish to all subscribers
+        (including this adapter). The chat-turn semantics that Hermes assumes
+        — "respond on the same channel" — are wrong for an event bus.
 
-        For Phoebe outbound, `chat_id` should be the target topic
-        (e.g., 'phoebe/hermes/chat_response' or 'phoebe/atlas/speak').
+        Behavior: only publishes to topics under `self_topic_prefix`
+        (default `phoebe/hermes/`). Everything else is suppressed silently with
+        a successful SendResult so the agent loop doesn't see a fake failure.
+
+        Intentional outbound (e.g., a future command-topic for orion control)
+        should be done via a direct paho-mqtt client in a tool/plugin, NOT via
+        this adapter's send(). This adapter is the INGEST surface.
         """
-        if not self._client or not self._connected:
-            return SendResult(success=False, error="MQTT client not connected")
-
         topic = chat_id or ""
         if not topic:
             return SendResult(success=False, error="Empty topic (chat_id)")
+
+        # Suppress publishes outside our designated outbound namespace.
+        # This is the feedback-loop guard — MQTT events are observations,
+        # not chat turns, so we should not auto-respond on the source topic.
+        if not topic.startswith(self._self_topic_prefix):
+            logger.debug(
+                "[%s] Suppressed response publish to %s (read-mostly adapter)",
+                self.name, topic,
+            )
+            return SendResult(success=True, message_id=f"suppressed_{topic}")
+
+        # Allow phoebe/hermes/* publishes (intentional outbound only).
+        if not self._client or not self._connected:
+            return SendResult(success=False, error="MQTT client not connected")
 
         try:
             qos = int((metadata or {}).get("qos", 1))
